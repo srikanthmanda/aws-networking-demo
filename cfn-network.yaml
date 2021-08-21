@@ -292,8 +292,9 @@ Resources:
   privateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
-      AvailabilityZone: !Select [0, !GetAZs]
+      AvailabilityZone: !Select [0, !GetAZs ]
       # Default (missing) argument of GetAZs function is "AWS::Region"
+      # Space is mandatory after "!GetAZs" when the argument is omitted
       VpcId: !Ref custVpc
       CidrBlock: !Select [1, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
       Tags:
@@ -315,7 +316,7 @@ Resources:
   publicSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      AvailabilityZone: !Select [1, !GetAZs]
+      AvailabilityZone: !Select [1, !GetAZs ]
       VpcId: !Ref custVpc
       CidrBlock: !Select [2, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
       Tags:
@@ -367,7 +368,7 @@ Resources:
   privateSubnet2:
     Type: AWS::EC2::Subnet
     Properties:
-      AvailabilityZone: !Select [1, !GetAZs]
+      AvailabilityZone: !Select [1, !GetAZs ]
       VpcId: !Ref custVpc
       CidrBlock: !Select [3, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
       Tags:
