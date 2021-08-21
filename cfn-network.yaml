@@ -1,0 +1,429 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: CloudFormation stack of a network with custom VPC, NACL, RTs, public & private SNs, SGs.
+
+# References & Resources:
+# https://docs.aws.amazon.com/vpc/latest/userguide/how-it-works.html
+# https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Subnets.html#VPC_Sizing
+# https://docs.aws.amazon.com/vpc/latest/userguide/vpc-network-acls.html
+# https://datatracker.ietf.org/doc/html/rfc1918
+# https://aws.amazon.com/vpc/faqs/
+
+Parameters:
+  sshSourceIpv4CidrBlock:
+    Description: CIDR block of IP v4 addresses from where SSH connections to Bastion are allowed
+    Type: String
+    Default: 0.0.0.0/0
+    # Find your IP at https://httpbin.org/ip or at www.google.com/search?q=what+is+my+ip
+    # and add "/32" to it for the CIDR block
+
+  vpcCidrBlock:
+    Description: CIDR block of the VPC's IP v4 addresses
+    Type: String
+    Default: 10.0.0.0/16
+    # RFC 1918 private IPs are recommended
+
+Resources:
+  custVpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref vpcCidrBlock
+      Tags:
+        - Key: Name
+          Value: !Join ["-", [!Ref "AWS::StackName", "vpc"]]
+
+  custNacl:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      VpcId: !Ref custVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-nacl
+
+  allowInboundHttpRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: false # Default is false
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 80
+        To: 80
+      Protocol: 6 # TCP
+      RuleAction: allow
+      RuleNumber: 100
+
+  allowInboundHttpsRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 443
+        To: 443
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 200
+
+  allowInboundSshRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: !Ref sshSourceIpv4CidrBlock
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 22
+        To: 22
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 300
+
+  allowInboundIntraVpcSshRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: !Ref vpcCidrBlock
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 22
+        To: 22
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 310
+
+  allowInboundResponsesToEphemeralPorts:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 1024
+        To: 65535
+        # These are ephemeral ports of NAT gateways & ELBs
+        # IANA, Linux & Unix ephemeral ports are all within this range 
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 400
+
+  allowOutboundResponsesToClientEphemeralPorts:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 32768
+        To: 65535
+        # This range includes IANA, Linux & Unix ephemeral ports
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 100
+
+  allowOutboundHttpRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 80
+        To: 80
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 200
+
+  allowOutboundHttpsRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: true
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 443
+        To: 443
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 300
+
+  allowOutboundIntraVpcSshRequests:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: !Ref vpcCidrBlock
+      Egress: true
+      NetworkAclId: !Ref custNacl
+      PortRange:
+        From: 22
+        To: 22
+      Protocol: 6
+      RuleAction: allow
+      RuleNumber: 400
+
+  bastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-sg-bastionSG
+      GroupDescription: Allow SSH from sshSourceIpv4CidrBlock IP addresses
+      VpcId: !Ref custVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref sshSourceIpv4CidrBlock
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg-bastion
+
+  adminSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-adminSG
+      GroupDescription: Allow SSH from Bastion SG
+      VpcId: !Ref custVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg-admin
+
+  allowSshFromBastionSGToAdminSG:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      IpProtocol: tcp
+      FromPort: 22
+      ToPort: 22
+      SourceSecurityGroupId: !GetAtt bastionSG.GroupId
+      GroupId: !GetAtt adminSG.GroupId
+
+  webSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${AWS::StackName}-webSG
+      GroupDescription: Allow HTTP and HTTPS traffic from everywhere
+      VpcId: !Ref custVpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg-web
+
+  igw:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+
+  attachIgwToCustVpc:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref custVpc
+      InternetGatewayId: !Ref igw
+
+  publicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref custVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-rt-public
+
+  addInternetRouteViaIgw:
+    DependsOn: attachIgwToCustVpc # Required for deterministic builds
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref publicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref igw
+
+  publicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, Fn::GetAZs: !Ref "AWS::Region"]
+      VpcId: !Ref custVpc
+      CidrBlock: !Select [0, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sn-public1
+
+  associatePublicSN1andNACL:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId: !Ref custNacl
+      SubnetId: !Ref publicSubnet1
+
+  associatePublicSN1andRT:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicSubnet1
+      RouteTableId: !Ref publicRouteTable
+
+  natGwElasticIp1:
+    DependsOn: attachIgwToCustVpc # Required for deterministic builds
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  natGw1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt natGwElasticIp1.AllocationId
+      SubnetId: !Ref publicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-natgw1
+
+  privateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref custVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-rt-private1
+
+  addPrivateRouteViaNatGw1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref privateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref natGw1
+
+  privateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs ]
+      # Default (missing) argument of GetAZs function is "AWS::Region"
+      # Space is mandatory after "!GetAZs" when the argument is omitted
+      VpcId: !Ref custVpc
+      CidrBlock: !Select [1, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sn-private1
+
+  associatePrivateSN1andNACL:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId: !Ref custNacl
+      SubnetId: !Ref privateSubnet1
+
+  associatePrivateSN1andRT1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateSubnet1
+      RouteTableId: !Ref privateRouteTable1
+
+  publicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ]
+      VpcId: !Ref custVpc
+      CidrBlock: !Select [2, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sn-public2
+
+  associatePublicSN2andNACL:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId: !Ref custNacl
+      SubnetId: !Ref publicSubnet2
+
+  associatePublicSN2andRT:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref publicSubnet2
+      RouteTableId: !Ref publicRouteTable
+
+  natGwElasticIp2:
+    DependsOn: attachIgwToCustVpc # Required for deterministic builds
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  natGw2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt natGwElasticIp2.AllocationId
+      SubnetId: !Ref publicSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-natgw2
+
+  privateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref custVpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-rt-private2
+
+  addPrivateRouteViaNatGw2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref privateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref natGw2
+
+  privateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs ]
+      VpcId: !Ref custVpc
+      CidrBlock: !Select [3, !Cidr [!GetAtt custVpc.CidrBlock, 4, 8]]
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sn-private2
+
+  associatePrivateSN2andNACL:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId: !Ref custNacl
+      SubnetId: !Ref privateSubnet2
+
+  associatePrivateSN2andRT2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref privateSubnet2
+      RouteTableId: !Ref privateRouteTable2
+
+Outputs:
+  custVpcId:
+    Value: !Ref custVpc
+    Export:
+      Name: !Sub ${AWS::StackName}-custVpcId
+
+  bastionSgId:
+    Value: !Ref bastionSG
+    Export:
+      Name: !Sub ${AWS::StackName}-sg-bastion
+
+  adminSgId:
+    Value: !Ref adminSG
+    Export:
+      Name: !Sub ${AWS::StackName}-sg-admin
+
+  webSgId:
+    Value: !Ref webSG
+    Export:
+      Name: !Sub ${AWS::StackName}-sg-web
+
+  publicSubnet1Id:
+    Value: !Ref publicSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-sn-public1
+
+  privateSubnet1Id:
+    Value: !Ref privateSubnet1
+    Export:
+      Name: !Sub ${AWS::StackName}-sn-private1
+
+  publicSubnet2Id:
+    Value: !Ref publicSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-sn-public2
+
+  privateSubnet2Id:
+    Value: !Ref privateSubnet2
+    Export:
+      Name: !Sub ${AWS::StackName}-sn-private2

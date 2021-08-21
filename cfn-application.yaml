@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: |
+  CloudFormation stack of an application with web servers running in private
+  subnets as an autoscaling group (ASG), behind an application load balancer
+  (ELB) running in public subnets. Also has a Bastion server running in public
+  subnet as a SSH jump server to web servers in private subnets.
+
+# References & Resources:
+# https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/quickref-autoscaling.html
+
+Parameters:
+  networkStack:
+    Description: Name of the Network CloudFormation stack
+    Type: String
+    Default: demoVpc
+
+  ec2Key:
+    Description: PEM key to access EC2 instances
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: demoKey
+    # This EC2 key has to be created before creating this stack
+
+Mappings:
+  amisByRegion:
+    us-east-1:
+      amzlinux2: ami-0c2b8ca1dad447f8a
+    # Add appropriate AMI ids to run build this stack in other regions
+
+Resources:
+  bastionLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-lt-bastion
+      LaunchTemplateData:
+        ImageId: !FindInMap [amisByRegion, us-east-1, amzlinux2]
+        InstanceType: t3.nano
+        KeyName: !Ref ec2Key
+        DisableApiTermination: true
+        NetworkInterfaces:
+          - AssociatePublicIpAddress: true
+            Groups:
+              - Fn::ImportValue: !Sub ${networkStack}-sg-bastion
+            DeviceIndex: 0
+
+  bastionAutoScaledInstance:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-asi-bastion
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${networkStack}-sn-public1
+      LaunchTemplate:
+        LaunchTemplateId: !Ref bastionLaunchTemplate
+        Version: !GetAtt bastionLaunchTemplate.LatestVersionNumber
+      DesiredCapacity: "1"
+      MinSize: "1"
+      MaxSize: "1"
+      HealthCheckGracePeriod: 300
+
+  webserverLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-lt-webserver
+      LaunchTemplateData:
+        ImageId: !FindInMap [amisByRegion, us-east-1, amzlinux2]
+        InstanceType: t3.nano
+        KeyName: !Ref ec2Key
+        # ⚠️ Warning: Don't use the bastion key for app servers in production.
+        # You may even avoid bastions & EC2 keys using alternatives like SSM.
+        SecurityGroupIds:
+          - Fn::ImportValue: !Sub ${networkStack}-sg-admin
+          - Fn::ImportValue: !Sub ${networkStack}-sg-web
+        UserData: !Base64 |
+          #!/bin/bash
+
+          sudo su
+
+          yum update -y
+          yum install -y httpd.x86_64
+
+          curl -o /var/www/html/index.html https://httpbin.org/ip
+          cat <<-ENDOFHEREFILE  >>/var/www/html/index.html
+          Above is the source IP address of requests from private SNs.
+          This IP address is the Elastic IP of the NAT Gateway.
+          ENDOFHEREFILE
+          echo "Hostname: $(hostname -f)" >>/var/www/html/index.html
+
+          systemctl enable httpd.service
+          systemctl start httpd.service
+
+  webserverElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-elb-webserver
+      SecurityGroups:
+        - Fn::ImportValue: !Sub ${networkStack}-sg-web
+      Subnets:
+        - Fn::ImportValue: !Sub ${networkStack}-sn-public1
+        - Fn::ImportValue: !Sub ${networkStack}-sn-public2
+
+  webserverElbTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-elb-tg-webserver
+      HealthCheckIntervalSeconds: 300
+      Port: 80
+      Protocol: HTTP
+      TargetGroupAttributes:
+        - Key: load_balancing.algorithm.type
+          Value: round_robin # This is default.
+          # The other algorithm is least_outstanding_requests.
+      VpcId:
+        Fn::ImportValue: !Sub ${networkStack}-custVpcId
+
+  webserversAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-asg-webserver
+      VPCZoneIdentifier:
+        - Fn::ImportValue: !Sub ${networkStack}-sn-private1
+        - Fn::ImportValue: !Sub ${networkStack}-sn-private2
+      LaunchTemplate:
+        LaunchTemplateId: !Ref webserverLaunchTemplate
+        Version: !GetAtt webserverLaunchTemplate.LatestVersionNumber
+      DesiredCapacity: "2"
+      MinSize: "2"
+      MaxSize: "2"
+      HealthCheckGracePeriod: 300
+      MaxInstanceLifetime: 2592000
+      TargetGroupARNs:
+        - !Ref webserverElbTargetGroup
+
+  webserverElbListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref webserverElasticLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref webserverElbTargetGroup
+
+Outputs:
+  webserverElbDnsName:
+    Value: !GetAtt webserverElasticLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-elb-webserver-dnsname
